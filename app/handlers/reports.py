@@ -1,4 +1,4 @@
-from aiogram import Router, types
+from aiogram import Router, types, F
 from aiogram.filters import Command
 
 from app.services import users as users_service
@@ -27,7 +27,7 @@ async def cmd_report(message: types.Message):
     if not project:
         await message.answer(
             "У тебя нет активного проекта.\n"
-            "Создай проект через /newproject."
+            "Создай проект через /newproject или кнопку «Новый проект»."
         )
         return
 
@@ -68,3 +68,12 @@ async def cmd_report(message: types.Message):
     summary = await gpt_summarize_report(structured)
     if summary:
         await message.answer(summary)
+
+
+@router.message(F.text == "Получить сводку по текущему проекту")
+async def btn_report_current(message: types.Message):
+    """
+    Обработка нажатия кнопки «Получить сводку по текущему проекту».
+    Используем ту же логику, что и для /report.
+    """
+    await cmd_report(message)
