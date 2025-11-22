@@ -41,7 +41,6 @@ async def cmd_newproject(message: types.Message, state: FSMContext):
     await state.set_state(NewProjectStates.waiting_for_name)
     await message.answer("Как назовём новый проект? (например: «Поездка в Китай»)")
 
-
 @router.message(NewProjectStates.waiting_for_name)
 async def newproject_name(message: types.Message, state: FSMContext):
     """Сохраняем имя проекта и спрашиваем валюту."""
@@ -119,7 +118,8 @@ async def _send_projects_inline_menu(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{p['name']} (ID {p['id']})",
+                    # убрали отображение ID из текста кнопки
+                    text=f"{p['name']}",
                     callback_data=f"{prefix}:{p['id']}",
                 )
             ]
@@ -214,7 +214,6 @@ async def cb_delete_project(callback: types.CallbackQuery):
 
     user = await _get_or_create_user(callback.from_user)
 
-    # Эту функцию мы допишем в app/services/projects.py на следующем шаге
     ok = await projects_service.delete_project(
         user_id=user["id"],
         project_id=project_id,

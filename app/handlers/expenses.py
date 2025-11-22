@@ -1,4 +1,7 @@
-from typing import Optional, Dict, Any
+from __future__ import annotations
+
+from typing import Optional, Dict, Any, List
+import re
 
 from aiogram import Router, types, F
 from aiogram.filters import Command
@@ -16,88 +19,142 @@ def register(dp):
     dp.include_router(router)
 
 
-# --- БАЗОВЫЙ ПАРСЕР ТЕКСТА ТРАТЫ ---
+# --- Тексты кнопок главного меню, которые НЕ должны попадать в парсер трат ---
+
+MAIN_MENU_BUTTONS = {
+    "Новый проект",
+    "Список проектов",
+    "Удалить проект",
+    "Получить сводку по текущему проекту",
+}
+
+
+# --- Нормализация валют -------------------------------------------------------
+
+CURRENCY_SYNONYMS = {
+    "RUB": (
+        "rub",
+        "руб",
+        "рубль",
+        "рубля",
+        "рублей",
+        "рубли",
+        "₽",
+    ),
+    "USD": (
+        "usd",
+        "доллар",
+        "доллара",
+        "долларов",
+        "бакс",
+        "бакса",
+        "баксов",
+        "$",
+        "дол",
+        "долл",
+    ),
+    "EUR": (
+        "eur",
+        "евро",
+        "€",
+    ),
+    "CNY": (
+        "cny",
+        "юань",
+        "юаня",
+        "юаней",
+        "юани",
+        "юан",
+        "yuan",
+    ),
+    "JPY": (
+        "jpy",
+        "йена",
+        "йены",
+        "йен",
+        "иена",
+        "иены",
+        "иен",
+        "yen",
+    ),
+}
+
+
+def normalize_currency_token(token: str) -> Optional[str]:
+    """
+    Приводим слово типа 'рублей', 'юаней', 'usd', '$' -> ISO-коду.
+    """
+    t = token.strip().lower()
+    t = t.strip(".,;:()[]{}")
+
+    for code, variants in CURRENCY_SYNONYMS.items():
+        if t == code.lower() or t in variants:
+            return code
+
+    return None
+
+
+# --- Простейший парсер текста траты ------------------------------------------
 
 
 def basic_parse_expense_text(text: str) -> Optional[Dict[str, Any]]:
     """
-    Очень простой разбор фразы вида:
+    Пытаемся вытащить категорию, сумму и валюту из простого текста:
     - "отели 65000"
-    - "сувенир 10 юаней"
-    - "еда 2000 rub"
-
-    Логика:
-      - первое слово -> категория
-      - последнее числовое значение -> amount
-      - токен рядом с числом, похожий на валюту -> currency
-      - всё остальное -> description
-
-    Если не смогли найти число — возвращаем None.
+    - "яблоки 1 доллар"
+    - "ягоды 20 юаней"
+    - "сахар 2 CNY"
     """
-    if not text:
+    s = (text or "").strip()
+    if not s:
         return None
 
-    raw = text.strip()
-    if not raw:
+    # Ищем ПОСЛЕДНЕЕ число в строке
+    m = re.search(
+        r"(?P<prefix>.*?)(?P<amount>\d+(?:[.,]\d+)?)(?P<suffix>.*)$",
+        s,
+    )
+    if not m:
         return None
 
-    parts = raw.split()
-    if len(parts) < 2:
+    prefix = (m.group("prefix") or "").strip()
+    suffix = (m.group("suffix") or "").strip()
+    amount_str = m.group("amount").replace(",", ".")
+    try:
+        amount = float(amount_str)
+    except ValueError:
         return None
 
-    category = parts[0].lower()
+    # Категория — всё, что до числа (например, "отель Пекин")
+    category = prefix if prefix else "прочее"
+    category = category.strip("•-–").strip()
 
-    amount = None
-    amount_idx = None
-    for i in range(len(parts) - 1, -1, -1):
-        p = parts[i].replace(",", ".")
-        try:
-            amount = float(p)
-            amount_idx = i
-            break
-        except ValueError:
-            continue
-
-    if amount is None:
-        return None
-
-    currency = None
-    if amount_idx + 1 < len(parts):
-        cur_token = parts[amount_idx + 1].strip().upper()
-        if len(cur_token) in (2, 3, 4):
-            currency = cur_token
-
-    description = raw
+    currency: Optional[str] = None
+    if suffix:
+        # Берём первое слово после числа ("юаней", "рублей", "CNY" и т.п.)
+        first_word = suffix.split()[0]
+        currency = normalize_currency_token(first_word)
 
     return {
-        "category": category,
         "amount": amount,
         "currency": currency,
-        "description": description,
+        "category": category,
+        "description": text,
     }
 
 
-# --- ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ ТРАТЫ ---
+# --- Основная логика обработки трат ------------------------------------------
 
 
 async def _process_expense_message(message: types.Message):
-    # Берём текст из сообщения или подписи
-    raw_text = (message.text or message.caption or "").strip()
+    text = (message.text or "").strip()
 
-    # Если это /add ..., срежем саму команду и оставим только трату
-    if raw_text.startswith("/add"):
-        text = raw_text[len("/add"):].strip()
-    else:
-        text = raw_text
-
-    if not text:
-        await message.answer(
-            "Пришли, пожалуйста, описание траты.\n"
-            "Например: <code>отели 65000</code> или <code>сувенир 10 юаней</code>."
-        )
+    # На всякий случай: если вдруг сюда всё-таки пролезла кнопка — выходим.
+    if text in MAIN_MENU_BUTTONS:
         return
 
     tg_user = message.from_user
+
     user = await users_service.get_or_create_user_by_telegram_id(
         telegram_id=tg_user.id,
         username=tg_user.username,
@@ -109,36 +166,55 @@ async def _process_expense_message(message: types.Message):
     if not project:
         await message.answer(
             "У тебя пока нет активного проекта.\n"
-            "Создай новый через /newproject или кнопку «Новый проект», "
-            "затем пришли трату ещё раз."
+            "Создай новый через /newproject, затем пришли трату ещё раз."
         )
         return
 
-    # 1) Пытаемся распарсить простым парсером
+    # 1. Пытаемся распарсить сами
     parsed = basic_parse_expense_text(text)
 
-    # 2) Если не вышло — пробуем GPT
+    # 2. Если не получилось или нет суммы — пробуем GPT
     use_gpt = parsed is None or parsed.get("amount") is None
     if use_gpt:
         gpt_result = await gpt_parse_expense(text)
         if gpt_result and gpt_result.get("amount"):
+            # Если GPT не указал валюту, но в тексте она есть — попробуем добрать сами
+            if not gpt_result.get("currency"):
+                m_cur = re.search(r"\d+(?:[.,]\d+)?\s+(\S+)", text)
+                if m_cur:
+                    cur = normalize_currency_token(m_cur.group(1))
+                    if cur:
+                        gpt_result["currency"] = cur
             parsed = gpt_result
 
     if not parsed or not parsed.get("amount"):
         await message.answer(
             "Не смог понять сумму траты 😔\n"
-            "Попробуй формат типа: <code>отели 65000</code> или <code>сувенир 10 юаней</code>."
+            "Попробуй формат типа: <code>отели 65000</code> "
+            "или <code>сувенир 10 юаней</code>."
         )
         return
 
     amount = float(parsed["amount"])
-    currency = (
-        parsed.get("currency")
-        or project.get("base_currency")
-        or user.get("base_currency")
-        or "RUB"
-    ).upper()
-    category_name = (parsed.get("category") or "прочее").lower()
+
+    # Выбираем валюту: из парсера -> из проекта -> из пользователя -> RUB
+    raw_currency = (
+        (parsed.get("currency") or "")
+        or (project.get("base_currency") or "")
+        or (user.get("base_currency") or "")
+    )
+    currency = raw_currency.upper() if raw_currency else "RUB"
+
+    # Нормализуем, если это русское слово типа "юаней"
+    norm_from_word = normalize_currency_token(currency)
+    if norm_from_word:
+        currency = norm_from_word
+
+    supported_currencies = {"RUB", "USD", "EUR", "CNY", "JPY"}
+    if currency not in supported_currencies:
+        currency = "RUB"
+
+    category_name = (parsed.get("category") or "прочее").strip().lower()
     description = parsed.get("description") or text
 
     # Категория
@@ -154,7 +230,7 @@ async def _process_expense_message(message: types.Message):
         rate = await get_rate_to_rub(currency)
         amount_rub = float(rate) * amount
 
-    # Сохраняем трату
+    # Сохраняем трату с оригинальной валютой и суммой в рублях
     await expenses_service.create_expense(
         user_id=user["id"],
         project_id=project["id"],
@@ -170,19 +246,19 @@ async def _process_expense_message(message: types.Message):
     by_currency = totals["by_currency"]
     total_rub = totals["total_rub"]
 
+    lines: List[str] = []
+
     pretty_amount_original = f"{amount:.2f}".rstrip("0").rstrip(".")
     pretty_amount_rub = f"{amount_rub:.2f}".rstrip("0").rstrip(".")
 
-    lines = []
-
     lines.append(f"Записал трату в проект <b>«{project['name']}»</b> ✅")
     lines.append(f"Категория: <b>{category_name.capitalize()}</b>")
-
     if currency == "RUB":
         lines.append(f"Сумма: <b>{pretty_amount_original} RUB</b>")
     else:
         lines.append(
-            f"Сумма: <b>{pretty_amount_original} {currency}</b> ≈ <b>{pretty_amount_rub} RUB</b>"
+            f"Сумма: <b>{pretty_amount_original} {currency}</b> "
+            f"≈ <b>{pretty_amount_rub} RUB</b>"
         )
 
     lines.append("")
@@ -199,37 +275,18 @@ async def _process_expense_message(message: types.Message):
     await message.answer("\n".join(lines))
 
 
-# --- КОМАНДЫ И ОБРАБОТЧИКИ ---
-
-
 @router.message(Command("add"))
 async def cmd_add(message: types.Message):
-    """
-    Команда /add — можно писать так:
-    /add отели 65000
-    /add сувенир 10 юаней
-    """
     await _process_expense_message(message)
 
 
-@router.message(F.text & ~F.text.startswith("/"))
+# ВАЖНО: здесь мы фильтром исключаем ВСЕ кнопки главного меню.
+# Тогда сообщение "Получить сводку по текущему проекту" вообще не попадёт
+# в этот хендлер и спокойно дойдёт до reports.py.
+@router.message(
+    F.text
+    & ~F.text.startswith("/")
+    & ~F.text.in_(list(MAIN_MENU_BUTTONS))
+)
 async def any_text(message: types.Message):
-    """
-    Любой текст без слэша спереди пытаемся трактовать как трату.
-    Кнопку «Получить сводку по текущему проекту» перенаправляем в отчёт,
-    остальные кнопки главного меню здесь просто игнорируем.
-    """
-    text = (message.text or "").strip()
-
-    if text == "Получить сводку по текущему проекту":
-        # Локальный импорт, чтобы не было проблем с циклическими импортами при старте
-        from app.handlers.reports import cmd_report
-
-        await cmd_report(message)
-        return
-
-    if text in ("Новый проект", "Список проектов", "Удалить проект"):
-        # Эти кнопки обрабатываются в других хендлерах
-        return
-
     await _process_expense_message(message)

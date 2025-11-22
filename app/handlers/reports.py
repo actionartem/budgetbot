@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Dict, Any
+
 from aiogram import Router, types, F
 from aiogram.filters import Command
 
@@ -8,14 +12,21 @@ from app.services.gpt_client import gpt_summarize_report
 
 router = Router()
 
+# Текст кнопки из главного меню
+BUTTON_REPORT_TEXT = "Получить сводку по текущему проекту"
+
 
 def register(dp):
     dp.include_router(router)
 
 
-@router.message(Command("report"))
-async def cmd_report(message: types.Message):
+async def _send_report(message: types.Message) -> None:
+    """
+    Общая функция: строит отчёт и отправляет его.
+    Вызывается и из /report, и из кнопки.
+    """
     tg_user = message.from_user
+
     user = await users_service.get_or_create_user_by_telegram_id(
         telegram_id=tg_user.id,
         username=tg_user.username,
@@ -27,18 +38,21 @@ async def cmd_report(message: types.Message):
     if not project:
         await message.answer(
             "У тебя нет активного проекта.\n"
-            "Создай проект через /newproject или кнопку «Новый проект»."
+            "Создай проект через /newproject."
         )
         return
 
-    totals = await expenses_service.get_project_totals(project["id"])
-    cat_totals = await expenses_service.get_project_category_totals_rub(project["id"])
+    totals: Dict[str, Any] = await expenses_service.get_project_totals(project["id"])
+    cat_totals: Dict[str, Any] = await expenses_service.get_project_category_totals_rub(
+        project["id"]
+    )
 
     by_currency = totals["by_currency"]
     total_rub = totals["total_rub"]
 
     lines = [f"Отчёт по проекту <b>«{project['name']}»</b>"]
 
+    # Блок по валютам
     if by_currency:
         lines.append("")
         lines.append("По валютам:")
@@ -46,6 +60,7 @@ async def cmd_report(message: types.Message):
             pretty = f"{float(val):.2f}".rstrip("0").rstrip(".")
             lines.append(f"• {code}: <b>{pretty}</b>")
 
+    # Блок по категориям
     if cat_totals:
         lines.append("")
         lines.append("Разбивка по категориям (в RUB):")
@@ -53,12 +68,14 @@ async def cmd_report(message: types.Message):
             pretty = f"{float(val):.2f}".rstrip("0").rstrip(".")
             lines.append(f"• {cat_name.capitalize()}: <b>{pretty}</b>")
 
+    # Итог в рублях
     pretty_total_rub = f"{float(total_rub):.2f}".rstrip("0").rstrip(".")
     lines.append("")
     lines.append(f"Итоговый бюджет в RUB: <b>{pretty_total_rub} RUB</b>")
 
     await message.answer("\n".join(lines))
 
+    # Структура для GPT-сводки
     structured = {
         "project_name": project["name"],
         "totals_by_currency": by_currency,
@@ -70,10 +87,17 @@ async def cmd_report(message: types.Message):
         await message.answer(summary)
 
 
-@router.message(F.text == "Получить сводку по текущему проекту")
-async def btn_report_current(message: types.Message):
-    """
-    Обработка нажатия кнопки «Получить сводку по текущему проекту».
-    Используем ту же логику, что и для /report.
-    """
-    await cmd_report(message)
+# Команда /report
+@router.message(Command("report"))
+async def cmd_report(message: types.Message):
+    await _send_report(message)
+
+
+# Нажатие кнопки "Получить сводку по текущему проекту"
+# Ловим ЛЮБОЙ текст и фильтруем уже внутри
+@router.message(F.text)
+async def report_button(message: types.Message):
+    if message.text != BUTTON_REPORT_TEXT:
+        return
+
+    await _send_report(message)
